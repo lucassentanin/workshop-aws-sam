@@ -1,0 +1,119 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Funcoes exemplo para workshop aws sam.
+
+Transform:
+  - AWS::Serverless-2016-10-31
+
+Parameters:
+  EnvironmentParam:
+    AllowedValues: [local, dev, hml, prd]
+    Description: 'Ambiente de implantacao, valores validos: local | dev | hml | prd'
+    Type: String
+
+Mappings:
+  EnviromentMap:
+    local:
+      WorkshopGeneratePdfBucket: 'local-workshop-generate-pdf-bucket'
+    dev:
+      WorkshopGeneratePdfBucket: 'dev-workshop-generate-pdf-bucket'
+    hml:
+      WorkshopGeneratePdfBucket: 'hml-workshop-generate-pdf-bucket'
+    prd:
+      WorkshopGeneratePdfBucket: 'prd-workshop-generate-pdf-bucket'
+
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  #################################################################################################
+  # Bucket S3
+  #################################################################################################
+  WorkshopGeneratePdfS3Bucket:
+    Type: 'AWS::S3::Bucket'
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub "${EnvironmentParam}-workshop-generate-pdf-bucket"
+
+  #################################################################################################
+  # Layer
+  #################################################################################################
+  WorkshopCommonLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub ${EnvironmentParam}-workshop-aws-sam-commons
+      Description: Commons dependencies for workshop functions
+      ContentUri: ./build/layers/workshop-aws-sam-commons
+      CompatibleRuntimes:
+        - nodejs14.x
+
+  #################################################################################################
+  # Filas SQS
+  #################################################################################################
+  GeneratePdfQueueDlq: 
+    Type: AWS::SQS::Queue
+    Properties:
+     QueueName: !Sub '${EnvironmentParam}-workshop-generate-pdf-queue-dlq'
+
+  GeneratePdfQueue:
+   Type: AWS::SQS::Queue
+   Properties:
+     QueueName: !Sub '${EnvironmentParam}-workshop-generate-pdf-queue'
+     RedrivePolicy: 
+        deadLetterTargetArn: 
+          Fn::GetAtt: 
+            - "GeneratePdfQueueDlq"
+            - "Arn"
+        maxReceiveCount: 1
+
+  #################################################################################################
+  # Policy
+  #################################################################################################
+  GeneratePdfFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentParam}-workshop-generate-pdf-function-role"
+      Description: "cccc"
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service: [ "lambda.amazonaws.com" ]
+            Action: [ "sts:AssumeRole" ]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        - PolicyName: workshop-aws-sam-generate-pdf
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: [sqs:DeleteMessage, sqs:ReceiveMessage, sqs:DeleteMessageBatch, sqs:ChangeMessageVisibility, sqs:GetQueueAttributes]
+                Resource: "*"
+
+  #################################################################################################
+  # Lambda Functions
+  #################################################################################################
+  GeneratePdfFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub '${EnvironmentParam}-workshop-generate-pdf'
+      Description: Gera PDF de exemplo para workshop.
+      CodeUri: build/functions/workshop/generate-pdf/
+      Handler: handler.lambdaHandler
+      Runtime: nodejs14.x
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/${EnvironmentParam}-workshop-generate-pdf-function-role'
+      Layers:
+        - !Ref WorkshopCommonLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref EnvironmentParam
+          WORKSHOP_GENERATE_PDF_BUCKET: !FindInMap [EnviromentMap, !Ref EnvironmentParam, WorkshopGeneratePdfBucket]
+      Events:
+        WorkshopGeneratePdfQueue:
+          Type: SQS
+          Properties:
+            Queue: !Sub 'arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:${EnvironmentParam}-workshop-generate-pdf-queue'
+            BatchSize: 10
